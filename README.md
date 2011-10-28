@@ -4,11 +4,11 @@
 
 ---
 
-Note: This documentation represents the current status of the Boundary JavaScript API as of October 12, 2012. While we will make a best effort to maintain compatibility and provide advance notice of API changes, all APIs and output formats described below are subject to change.
+Note: This documentation represents the current status of the Boundary JavaScript API as of October 28, 2012. While we will make a best effort to maintain compatibility and provide advance notice of API changes, all APIs and output formats described below are subject to change.
 
 ## Overview
 
-The Boundary JavaScript API encapsulates the functionality required to authenticate and manage CometD subscriptions to the Boundary Streaming API service. The JavaScript API allows you to retrieve streaming JSON data from various Boundary endpoints, or "data sources," and associate that incoming data with any JavaScript object that implements an "update" method. One common use of this functionality would be to create browser-based visualizations of the data being reported for your organization.
+The Boundary JavaScript API encapsulates the functionality required to authenticate and manage CometD subscriptions to the Boundary Streaming API service. The JavaScript API allows you to retrieve streaming JSON data from various Boundary endpoints, or "data sources," and associate that incoming data with any JavaScript object that implements an "update" method. One common use of this functionality would be to create browser-based visualizations of the traffic data being reported for your organization. It is the basis of Boundary's own visualization front end.
 
 ## External Requirements
 
@@ -49,39 +49,75 @@ In order for the Boundary JavaScript API to function, the bndry.auth object must
 
 In the repo, this is defined in **/bndry/auth.js**. You will need to replace the information in that file with your own account credentials, which may be retrieved from [https://boundary.com/account](https://boundary.com/account).
 
-## Data Sources
+## dataSources
 
-Once the auth object is defined, you must include the **/bndry/data-source.js** file, which will create the **bndry.dataSource** method. Calling this method will return a new dataSource instance, which other objects may subscribe to:
+A dataSource object manages the connection to a single query in the Boundary Streaming API, and allows subscriber objects to recieve updates from the dataSource as they arrive from the API. It is defined in the **/bndry/data-source.js** file, which will create the **bndry.dataSource** object. Calling this method will return a new dataSource instance, which other objects may subscribe to:
 
-	bndry.dataSource(query, [update_interval])
+	bndry.dataSource.create(query, [options]) -> dataSource
 
-An optional update interval value may be passed to the dataSource method to force the dataSource to return updates at regular intervals, instead of waiting for updates from the server. This is most useful at the 1 second time resolution, to smooth out updates.
+The second, optional argument passed to the dataSource **create** method is an object specifying additional configuration parameters:
 
-An example:
+* **updateInterval** - may be passed to the dataSource method to force the dataSource to return updates at regular intervals, instead of waiting for updates from the server. This is most useful at the 1 second time resolution, to smooth out updates
+* **forceConnect** - normally, a dataSource will not poll the streaming API for updates unless it has at least one subscriber. This option forces dataSource to poll the API regardless.
+* **subscription** - currently only required to subscribe to annotations, in which case it should be set to 'opaque'.
 
-	var source = bndry.dataSource('volume_1s', 1000);
+To force subscription updates every second, regardless of new data from the API:
 
-## Subscribing to a dataSource
+	var source = bndry.dataSource.create('volume_1s', { updateInterval: 1000 });
 
-Once a dataSource instance has been created, any number of arbitrary objects that define an "update" method may subscribe to it. A dataSource defines the following methods.
+To subscribe to annotation updates:
 
+	var source = bndry.dataSource.create('annotations', { subscription: 'opaque' });
+
+For a list of all available queries in the Streaming API, see the Data Sources section of [the Streaming API Documentation](https://boundary.com/docs#streaming_api).
+
+## dataSource subscribers
+
+A dataSource subscriber is any object that has defined an **update** method. Once an object has subscribed to recieve updates from a dataSource, it will begin recieving data objects from the Streaming API via this method.
+
+An example of a subscriber that simply log's Streaming API data:
+
+	var logger = {
+		update: function (data) {
+			console.log(data);
+		}
+	};
+
+## dataSource updates
+
+The required **update** method recieves updates from the dataSource. If a transformation function has not been paired with this subscriber (discussed in the [addSubscriber](#add-subscriber) section in [dataSource Methods](#data-source-methods)), then the update object will have the following fields:
+
+* **state** - list of all currently tracked samples for the dataSource's query, keyed by a unique field named **\_\_key\_\_**, which is a composite of the sample's other fields concatenated with the ':' character
+* **added** - list of samples added to the state since the last update
+* **removed** - list of samples removed from the state since the last update
+
+<a id="data-source-methods"></a>
+## dataSource Methods
+
+Once a dataSource instance has been created, any number of subscription objects may subscribe to it for updates, unsubscribe from updates, request the most recent data recieved from the Streaming API, or update their optional transformation functions.
+
+<a id="add-subscriber"></a>
 ### addSubscriber
 
-	datasource.addSubscriber(object) -> subscription_id
+Registers a subscriber object to start recieving data from the Streaming service. Calling this method returns a subscription identifier, which may be used to update or remove the subscription later.
 
-Registers an object that defines an update method to start recieving data from the Streaming service. It returns a subscription object, which may be used to unsubscribe the object from that dataSource. Speaking of which…
+	datasource.addSubscriber(subscriber_object, [transformation]) -> subscription_id
 
-### removeSubscriber
-	
-	datasource.removeSubscriber(subscription_id)
+An optional **transformation** function may be provided to process the data before it is handed off to the subscriber's **update** method. The transformation function is any function that takes a data object and a callback as input, and passes it's processed data to the supplied callback method when it is finished. This allows for potentially asynchronous data processing, such as using web workers.
 
-Deregisters an object from recieving updates from a dataSource.
+	var transformation = function (data, callback) {
+		var transformed_data = {};
 
-#### Example
+		… map incoming data to the transformed_data set …
 
-Subscribing to a total volume per second stream, with an optional forced update interval of one second:
+		callback(transformed_data);
+	}
 
-	var source = bndry.dataSource('volume_1s', 1000);
+The **addSubscriber** method returns a subscription identifier, which may be used to unsubscribe the object from it's dataSource at any time.
+
+Example: subscribing to a total volume per second stream, with an optional forced update interval of one second:
+
+	var source = bndry.dataSource.create('volume_1s', { updateInterval: 1000 });
 	var logger = {
 		update: function (data) {
 			console.log(data);
@@ -89,39 +125,24 @@ Subscribing to a total volume per second stream, with an optional forced update 
 	};
 	var subscription = source.addSubscriber(logger);
 
-## dataSource subscribers
+### updateTransformation
 
-Once an object has subscribed to updates from a dataSource, it will begin recieving data objects via it's own update method. Note that a subscriber object **must** implement an update method, and may also implement an optional dataProcessor method.
+Updates the transformation function associated with a particular subscriber.
 
-### dataProcessor(data, callback)
+	datasource.updateTransformation(subscription_id, transform_function)
 
-If defined, the dataSource will call this method to process the raw subscription data into a different format. It must be returned via the supplied callback before it can be handed off to the object's update method.
+Calling this method will immediately update the subscriber associated with this subscription_id, using the new transformation function.
 
-An example:
+### removeSubscriber
 	
-	var source = bndry.dataSource('volume_1s', 1000);
-	var logger = {
-		dataProcessor: function (data, callback) {
-			var ingressOctets = [];
-			for (s in data.state) {
-				ingressOctets.push(data.state[s].ingressOctetTotalCount);
-			}
-		},
-		update: function (octetList) {
-			console.log(octetList);
-		}
-	};
-	var subscription = source.addSubscriber(logger);
-	
+Decouples a subscription object from a dataSource.
 
-### update(data)
+	datasource.removeSubscriber(subscription_id)
 
-This required method recieves updates from the dataSource. If a dataProcessor method was not defined, then the format of this object is described below. Otherwise, the format of will be defined by the dataProcessor method.
+Onced called, the subscription object associated with that subscription_id will no long recieve updates from the dataSource instance.
 
-## The data object
+### lastUpdate
 
-Updates from the Streaming API are processed by the dataSource and delivered to subscribers in the following format:
+Returns the last data object sent to all subscribers.
 
-* **state** - list of all currently tracked samples, categorized by a unique field named \_\_key\_\_
-* **added** - list of samples added to the state set since the last update
-* **removed** - list of samples removed from the state set since the last update
+	datasource.lastUpdate() -> unprocessed data object
