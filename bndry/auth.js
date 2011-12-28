@@ -3,8 +3,7 @@ var bndry = bndry || {};
 
 (function (bndry, undefined) {
   bndry.auth = {
-    cometd: "https://api.boundary.com/streaming",
-    user: <account email>,
+    cometd: 'https://api.boundary.com/streaming',
     org_id: <account org id>,
     apikey: <account api key>
   };
