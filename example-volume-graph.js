@@ -1,35 +1,15 @@
 window.onload = function () {
 
-  // create the data source, passing an optional value to force updates every second, regardless of new data
-  var volumeData = bndry.dataSource.create('volume_1s', { updateInterval: 1000 }),
-      subscription = null;
+  var volumeData = bndry.dataSource.create('volume_1s'),
+      subscription = null,
 
-  function subscribe() {
-    // subscribe to the dataSource, passing in an optional data transformation function
-    //   to normalize the data for graphing
-    subscription = volumeData.addSubscriber(graph, normalizeOctets);
-    
-    document.getElementById('subscribe').disabled = true;
-    document.getElementById('unsubscribe').disabled = false;
-  }
-
-  function unsubscribe() {
-    // unsubscribe from the data source using the subscription id we stored earlier
-    volumeData.removeSubscriber(subscription);
-    
-    subscription = null;
-    document.getElementById('subscribe').disabled = false;
-    document.getElementById('unsubscribe').disabled = true;
-  }
-  
-  document.getElementById('subscribe').onclick = subscribe;
-  document.getElementById('unsubscribe').onclick = unsubscribe;
+      canvas = document.getElementById('graph'),
+      width = canvas.width,
+      height = canvas.height;
 
   /*
      Processes the state field into a more useful form for drawing a bar graph over a time interval.
      For the volume_1s query, the state key is the timestamp of the sample.
-
-     The callback will return the data to the dataSource for handoff to the subscriber.
   */
   function normalizeOctets (data, callback) {
     var maxIngressValue = 0,
@@ -56,57 +36,68 @@ window.onload = function () {
     }
 
     // return the processed, time-ordered data for handoff to dataSource subscribers
-    callback(sortedIngressValues.reverse());
+    return sortedIngressValues;
   }
   
   /*
-     The graph object will subscribe to a dataSource. A dataSource subscriber has one
-     required field, update. Without a transformation provided with the object's dataSource
-     subscription, the data argument passed to update would look like the following:
+     The data argument passed to the subscriber function has the following format:
 
-         data = {
-           added: items that have been added to the data set since the last update,
+       data = {
+         added: items that have been added to the data set since the last update,
+                stored by key; undefined if none
+         removed: items that have been removed from the data set since the last update,
                   stored by key; undefined if none
-           removed: items that have been removed from the data set since the last update,
-                    stored by key; undefined if none
-           state: all items currently being reported from the Streaming API for this query,
-                  stored by key
-         }
-
-       However, since we've defined a transformation function to smooth out, normalize, and order
-       the data being recieved by this subscriber, our update method will recieve an array of
-       numbers scaled from 0 to 1, representing the relative height of each sample in the graph.
+         state: all items currently being reported from the Streaming API for this query,
+                stored by key
+       }
   */
-  var graph = {
-    canvas: document.getElementById('graph'),
+  function update(data) {
+    var context = canvas.getContext('2d'),
+        lineWidth,
+        sampleCount,
+        sampleHeight,
+        sample;
+
+    data = normalizeOctets(data);
+    sampleCount = data.length,
+    lineWidth = width / sampleCount,
     
-    update: function (data) {
-      var width = this.canvas.width,
-          height = this.canvas.height,
-          context = this.canvas.getContext('2d'),
-          i = 0,
-          samples = data.length,
-          lineWidth = width / samples,
-          sample,
-          sampleHeight;
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#555';
 
-      context.clearRect(0, 0, width, height);
-      context.fillStyle = '#555';
-
-      // loop over the samples and render them to scale in the graph
-      for (; i < samples; ++i) {
-        sample = data[i];
-        sampleHeight = sample * height;
-        
-        context.fillRect(width - (i + 1) * lineWidth,
-                         height - sampleHeight,
-                         lineWidth,
-                         sampleHeight);
-      }
+    // loop over the samples and render them to scale in the graph
+    for (var i = 0; i < sampleCount; ++i) {
+      sample = data[i];
+      sampleHeight = sample * height;
+      
+      context.fillRect(width - (i + 1) * lineWidth,
+                       height - sampleHeight,
+                       lineWidth,
+                       sampleHeight);
     }
-  };
+  }
+
+  function subscribe() {
+    /* subscribe to the dataSource, passing the function to call when updates
+       are recieved from the Streaming API */
+    subscription = volumeData.addSubscriber(update);
+    
+    document.getElementById('subscribe').disabled = true;
+    document.getElementById('unsubscribe').disabled = false;
+  }
+
+  function unsubscribe() {
+    // unsubscribe from the data source using the subscription id we stored earlier
+    volumeData.removeSubscriber(subscription);
+    
+    subscription = null;
+    document.getElementById('subscribe').disabled = false;
+    document.getElementById('unsubscribe').disabled = true;
+  }
+  
+  document.getElementById('subscribe').onclick = subscribe;
+  document.getElementById('unsubscribe').onclick = unsubscribe;
 
   // kick everything off by subscribing the graph to the datasource
   subscribe();
-
 };
