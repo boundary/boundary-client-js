@@ -3,17 +3,13 @@ if (!console) { var console = { log: function () {} }; }
 
 (function (bndry, $, undefined) {
   var uid = 0,
-      activeDataSources = [];
+      activeDataSources = [],
+      transientFilterIDs = {};
 
   // set to true for handshake and subscription logging
   bndry.debug = false;
 
-  if (!bndry.auth) {
-    throw new Error('Boundary auth credentials not defined');
-    return;
-  }
-
-  // struct utility
+  // struct utility (defined in utils.js but included here as well for easier maintenance of the client-facing repo)
   bndry.utils = bndry.utils || {};
   bndry.utils.struct = bndry.utils.struct || {
     pack: function (objects) {
@@ -123,9 +119,12 @@ if (!console) { var console = { log: function () {} }; }
         }
 
         if (started) {
+          // reset any cached transient fp ids, in case those have timed out between handshakes
+          requestFilteredQueryChannel.clearCache();
+
           // check for any pre-existing subscriptions (maybe we got disconnected and need to resubscribe)
           for (i = 0, len = activeDataSources.length; i < len; ++i) {
-            activeDataSources[i].reconnect();
+            activeDataSources[i].reconnect(true);
           }
         } else {
           started = true;
@@ -218,35 +217,106 @@ if (!console) { var console = { log: function () {} }; }
     };
   };
 
-  // get a filtered/aggregated query channel to use with a datasource instance
-  var requestFilteredQueryChannel = (function () {
+
+  // generate a unique, consistent MD5 value from a transient flow profile filter, regardless of field orderings;
+  //   used to cache requests to generate transient flow profile IDs
+  var filterObjectToMD5 = (function () {
+    var sorter = {
+      meters: undefined,  // default sort is fine
+      country: undefined, // default sort is fine
+      transport: function (a, b) {
+        var order = 0;
+
+        // order first by port, then by protocol
+        if (a.port < b.port) {
+          order = -1;
+        } else if (a.port == b.port) {
+          if (a.protocol < b.protocol) {
+            order = -1;
+          } else if (a.protocol > b.protocol) {
+            order = 1;
+          }
+        } else {
+          order = 1;
+        }
+
+        return order;
+      }
+    };
+
+    var process = {
+      meters: function (o) { return o.sort(sorter['meters']); },
+      country: function (o) { return o.sort(sorter['country']); },
+      transport: function (o) {
+        var values = o.sort(sorter['transport']),
+            ordered = [],
+            i;
+
+        for (i = 0; i < values.length; ++i) {
+          ordered.push('port');
+          ordered.push(o[i].port);
+          ordered.push('protocol');
+          ordered.push(o[i].protocol);
+        }
+
+        return ordered;
+      },
+      _default: function (o) {
+        if (o.sort && typeof o.sort === 'function') {
+          o.sort();
+        }
+
+        return o;
+      }
+    };
+
+    // { meters: [4, 7], transport: [{ port: 4740, protocol: 6 }], country: ['US', 'CA'] } ==>
+    //   ['meters', [4, 7], 'transport', ['port', 4720, 'protocol', 6], 'country', ['US', 'CA']]
+    return function (obj) {
+      var keys = [], key,
+          fields = [],
+          i;
+
+      // get all filter keys in sorted order
+      for (key in obj) {
+        keys.push(key);
+      }
+      keys.sort();
+
+      // now create an array of [key, processedValue, key, processedValue ...] ordered pairs
+      for (i = 0; i < keys.length; ++i) {
+        key = keys[i];
+
+        fields.push(key);
+        fields.push((process[key] || process._default)(obj[key]));
+      }
+
+      return bndry.utils.md5(JSON.stringify(fields));
+    };
+  })();
+
+  // get a meter-aggregated query channel to use with a datasource instance
+  var requestAggregatedQueryChannel = (function () {
     var id = 0,
-        filterQueryRequests = {},
+        aggregateQueryRequests = {},
         initialized = false;
 
     function responder(response) {
       var data = response.data || {};
 
       if (data.result === 'success') {
-        if (filterQueryRequests[data.id]) {
+        if (aggregateQueryRequests[data.id]) {
           // return the channel name to the callback assigned this id
-          filterQueryRequests[data.id](data.location);
-          delete filterQueryRequests[data.id];
+          aggregateQueryRequests[data.id](data.location);
+          delete aggregateQueryRequests[data.id];
         }
       } else {
         throw(new Error(data.message));
       }
     }
 
-    /*
-      filter = {
-        name: filter name to apply to the query (currently only 'filter_by_meters'),
-        values: list of key:value pairs to pass to the filter service
-      }
-    */
-    return function (query, filter, callback) {
-      var msg = { ext: {} },
-          o;
+    return function (query, meters, callback) {
+      var msg = { ext: {} };
 
       // we have to make sure the handshake has happened before we do anything
       if (!initialized) {
@@ -261,36 +331,144 @@ if (!console) { var console = { log: function () {} }; }
       if (initialized) {
         msg.ext.query = query;
         msg.ext.id = (id++).toString();
-        for (o in filter.values) {
-          if (o !== 'id' && o !== 'query') {
-            msg.ext[o] = filter.values[o];
-          }
-        }
+        msg.ext.observation_domain_ids = meters;
 
-        filterQueryRequests[msg.ext.id] = callback;
+        aggregateQueryRequests[msg.ext.id] = callback;
 
-        $.cometd.publish('/service/queries/' + filter.name, msg);
+        $.cometd.publish('/service/queries/filter_by_meters', msg);
       } else {
         // streakerClient wasn't ready, so retry in a moment
         window.setTimeout(function () {
-          requestFilteredQueryName(query, filter, callback);
+          requestAggregateQueryName(query, meters, callback);
         }, 100);
       }
     };
+  })();
+
+  // get a set of filtered channels for a given set of meters
+  var requestFilteredQueryChannel = (function () {
+    var filterQueryRequests = {},
+        filterCache = {},
+        initialized = false;
+
+    function responder(response) {
+      var data = response.data || {},
+          request;
+
+      if (data.result === true) {
+        if (filterQueryRequests[data.request_id]) {
+          // cache this transient ID for future requests using the same filter object
+          //   (request_id === the hash of the filter object)
+          filterCache[data.request_id] = {
+            query: 'fp-' + data.id,
+            subscribers: 0
+          };
+
+          // loop over all the callback requests waiting for this transient flow profile id
+          while (filterQueryRequests[data.request_id].length) {
+            request = filterQueryRequests[data.request_id].pop();
+            request.callback('fp-' + data.id + '_' + request.query);
+            filterCache[data.request_id].subscribers++;
+          }
+
+          delete filterQueryRequests[data.request_id];
+        }
+      } else {
+        throw(new Error(data.message));
+      }
+    }
+
+    var api = function (query, filter, callback) {
+      var filterHash = filterObjectToMD5(filter),
+          msg = { ext: { flow_profile: {} } },
+          o;
+
+      // see if we already requested this; if so, just append the id and return
+      //   (lol this next line rhymes)
+      if (filterCache[filterHash]) {
+        callback(filterCache[filterHash].query + '_' + query);
+        filterCache[filterHash].subscribers++;
+        return;
+      }
+
+      // we have to make sure the handshake has happened before we do anything
+      if (!initialized) {
+        if (!streakerClient.initialized) {
+          streakerClient = streakerClient();
+        } else if (streakerClient.isStarted()) {
+          $.cometd.addListener('/service/flow_profiles', responder);
+          initialized = true;
+        }
+      }
+
+      if (initialized) {
+        // see if we already have a request in the pipeline for this transient filter
+        if (filterQueryRequests[filterHash]) {
+          filterQueryRequests[filterHash].push({
+            query: query,
+            callback: callback
+          });
+
+        // this is the first request for this particular filter, so publish a request
+        } else {
+          msg.ext.request_id = filterHash;
+          msg.ext.flow_profile.name = '' + filterHash;
+          msg.ext.flow_profile.filter = {};
+          for (o in filter) {
+            msg.ext.flow_profile.filter[o] = filter[o];
+          }
+
+          // store the query and callback for use when we get a response from cometd
+          filterQueryRequests[filterHash] = [];
+          filterQueryRequests[filterHash].push({
+            query: query,
+            callback: callback
+          });
+
+          // generate the request
+          $.cometd.publish('/service/flow_profiles/create_transient_flow_profile', msg);
+        }
+      } else {
+        // streakerClient wasn't ready, so retry in a moment
+        window.setTimeout(function () {
+          requestFilteredQueryChannel(query, filter, callback);
+        }, 100);
+      }
+    };
+
+    api.clearCache = function () {
+      filterCache = {};
+    };
+
+    // need to track how many subscribers are using this transient FP; when it reaches zero it will be torn down, so we need
+    //   to invalidate that cache entry
+    api.decrementSubscribers = function (filter) {
+      var filterHash = filterObjectToMD5(filter);
+
+      if (filterCache[filterHash]) {
+        filterCache[filterHash].subscribers--;
+
+        if (filterCache[filterHash].subscribers <= 0) {
+          delete filterCache[filterHash];
+        }
+      }
+    };
+
+    return api;
   })();
 
   /*
      options = {
        forceConnect: force a datasource to recieve updates, even if it has no subscribers,
        subscriber: only used for annotations, pass 'opaque'
-     }
-
-     filter = {
-       name: name of filter the channel on /service/queries (ie, 'filter_by_meters'),
-       values: list of key:value pairs to pass to the filter service
+       aggregate: array of meters to aggregate on
+       filter: {
+         country: array of two letter country codes to filter on [optional]
+         transport: array of { port: #, protocol: # } values to filter on [optional]
+       }
      }
   */
-  var dataSource = function (query, options, filter) {
+  var dataSource = function (query, options) {
     if (!streakerClient.initialized) {
       streakerClient = streakerClient();
     }
@@ -351,6 +529,8 @@ if (!console) { var console = { log: function () {} }; }
       var schema, // holds a mapping of array offsets to field names; use this to expand compressed objects before emitting to consumers
           keys;   // list of field names that make up unique key
 
+      var possiblyNoMeterData = false;
+
       function expand(source) {
         var out = [];
 
@@ -368,17 +548,21 @@ if (!console) { var console = { log: function () {} }; }
             added = null,
             removed = null;
 
+        // these fields come in the state dump
         if (data.schema) {
           schema = data.schema;
+          keys = data.keys;
         }
 
-        if (data.keys) {
-          keys = data.keys;
+        // if we didn't get inserts in the state dump, we aren't getting meter data for this query
+        if (data.keys && data.schema && data.insert.length === 0) {
+          possiblyNoMeterData = true;
         }
 
         if (schema) {
           if (data.insert && data.insert.length) {
             added = expand(data.insert);
+            possiblyNoMeterData = false;
           }
 
           if (data.remove && data.remove.length) {
@@ -388,7 +572,8 @@ if (!console) { var console = { log: function () {} }; }
 
         return {
           added: added,
-          removed: removed
+          removed: removed,
+          possiblyNoMeterData: possiblyNoMeterData
         };
       };
     })();
@@ -403,21 +588,29 @@ if (!console) { var console = { log: function () {} }; }
     }
 
     // loop through subscribers and notify them of new data
-    function update(data) {
+    function update(data, force) {
       var s;
 
-      if (!restarting) {
+      // only update subscribers if we aren't restarting
+      if (!restarting || force) {
         data.state = state.update(data.added, data.removed);
 
-        // only update subscribers if we aren't restarting AND have state changes
-        if (data.state) {
+        // only update subscribers if we have state changes or need to report no meter data
+        if (data.state || data.possiblyNoMeterData || force) {
 
           window.setTimeout(function () {
             for (s in subscribers) {
               try {
                 updateSubscriber(subscribers[s], data);
               } catch (e) {
-                throw(e);
+                // need to handle this generically so we still update the other subscribers
+                if (e.stack) {
+                  console.log(e.stack);
+                } else if (e.stackTrace) {
+                  console.log(e.stackTrace);
+                } else {
+                  console.log('Error: ' + e.type + ' - ' + e.message);
+                }
               }
             }
           }, 0);
@@ -434,6 +627,8 @@ if (!console) { var console = { log: function () {} }; }
 
     // connects to streaker, with optional completion callback
     function connect(complete) {
+      var filter = {}, f;
+
       function finish(query) {
         state.clear();
         lastData = {};
@@ -447,13 +642,27 @@ if (!console) { var console = { log: function () {} }; }
 
       if (!streakerID || streakerID === WAITING) {
         if (streakerClient.isStarted()) {
-          if (filter) {
+          if (options.filter) {
             streakerID = WAITING;
+
+            for (f in options.filter) {
+              filter[f] = options.filter[f];
+            }
+
+            // grab meters from the aggregate value if it wasn't defined in filters
+            if (!filter.meters && options.aggregate) {
+              filter.meters = options.aggregate;
+            }
+
             requestFilteredQueryChannel(query, filter, finish);
+          } else if (options.aggregate) {
+            streakerID = WAITING;
+            requestAggregatedQueryChannel(query, options.aggregate, finish);
           } else {
             finish(query);
           }
         } else {
+          // we need to wait for the handshake
           streakerID = WAITING;
           window.setTimeout(function () {
             connect(complete);
@@ -464,17 +673,37 @@ if (!console) { var console = { log: function () {} }; }
 
     // disconnect from streaker, with optional completion callback
     function disconnect(complete) {
+      var filter = {}, f;
+
       if (streakerID) {
         if (streakerID === WAITING) {
           window.setTimeout(function () {
             disconnect(complete);
           }, 100);
         } else {
-          streakerClient.unsubscribe(streakerID, complete);
-          streakerID = null;
+          // if this is a transient FP, we need to see if this disconnect will tear down the query set
+          if (options.filter) {
+            for (f in options.filter) {
+              filter[f] = options.filter[f];
+            }
 
-          state.clear();
-          lastData = {};
+            // grab meters from the aggregate value if it wasn't defined in filters
+            if (!filter.meters && options.aggregate) {
+              filter.meters = options.aggregate;
+            }
+
+            requestFilteredQueryChannel.decrementSubscribers(filter);
+          }
+
+          streakerClient.unsubscribe(streakerID, function () {
+            streakerID = null;
+            state.clear();
+            lastData = {};
+
+            if (complete) {
+              complete();
+            }
+          });
         }
       }
     }
@@ -488,6 +717,14 @@ if (!console) { var console = { log: function () {} }; }
     // instance interface
     ds = {
       addSubscriber: function (subscriber, transformation) {
+        // make sure "this" is properly bound to the subscriber's instance, in case that matters to the subscriber
+        function bind(o, f) {
+          return function () {
+            var args = Array.prototype.slice.call(arguments);
+            f.apply(o, args);
+          };
+        }
+
         // connect if we haven't already
         if (!streakerID) {
           connect();
@@ -496,8 +733,9 @@ if (!console) { var console = { log: function () {} }; }
         // update the subscriber list with the new info
         // TODO: remove support for passing in objects with an update method
         subscribers[++uid] = {
-          update: subscriber,
-          transform: (transformation && typeof transformation === 'function') ? transformation : null
+          update: subscriber.update ? bind(subscriber, subscriber.update) : subscriber,
+          transform: (transformation && typeof transformation === 'function' ?
+                      bind(subscriber, transformation) : null)
         };
 
         subscriberCount++;
@@ -522,6 +760,48 @@ if (!console) { var console = { log: function () {} }; }
         }
       },
 
+      reconnect: function (warnSubscribers) {
+        if (streakerID) {
+          restarting = true;
+
+          disconnect(function () {
+            if (warnSubscribers) {
+              update({ reconnecting: true }, true);
+            }
+            
+            connect(function () {
+              restarting = false;
+            });
+          });
+        }
+      },
+
+      updateQuery: function (updatedQuery, updatedOptions) {
+        updatedOptions = updatedOptions || {};
+
+        if (streakerID) {
+          restarting = true;
+
+          disconnect(function () {
+            if (updatedOptions !== undefined) {
+              options = updatedOptions;
+            }
+
+            query = updatedQuery;
+            connect(function () {
+              restarting = false;
+            });
+          });
+        } else {
+          // not currently connected to streaker, so just update the options
+          if (updatedOptions !== undefined) {
+            options = updatedOptions;
+          }
+
+          query = updatedQuery;
+        }
+      },
+
       // update a data transformation function for a subscription (pass null to remove transformation)
       updateTransformation: function (id, transformation) {
         if (subscribers[id]) {
@@ -534,28 +814,9 @@ if (!console) { var console = { log: function () {} }; }
         }
       },
 
-      reconnect: function () {
-        if (streakerID) {
-          restarting = true;
-
-          disconnect(function () {
-            connect(function () {
-              restarting = false;
-            });
-          });
-        }
-      },
-
-      updateFilter: function (updatedFilter) {
-        filter = updatedFilter;
-        this.reconnect();
-      },
-
       lastUpdate: function () {
         return lastData;
-      },
-
-      sc: function () { return subscriberCount; }
+      }
     };
 
     // store this interface in case streaker needs to reconnect us at some point
@@ -567,8 +828,5 @@ if (!console) { var console = { log: function () {} }; }
   // expose public-facing functionality
   bndry.dataSource = dataSource;
   bndry.dataSource.create = dataSource;
-
-  // not sure why anyone would need this, but here you go
-  bndry.dataSource.requestFilteredQueryChannel = requestFilteredQueryChannel;
 
 })(bndry, jQuery);
