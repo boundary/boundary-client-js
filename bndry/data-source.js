@@ -2,6 +2,8 @@ var bndry = bndry || {};
 if (!console) { var console = { log: function () {} }; }
 
 (function (bndry, $, undefined) {
+  "use strict";
+  
   var uid = 0,
       activeDataSources = [],
       transientFilterIDs = {};
@@ -61,7 +63,7 @@ if (!console) { var console = { log: function () {} }; }
           s, sLen,
           tmp;
 
-      if (payload.constructor == Array) {
+      if (payload.constructor === Array) {
         // nothing to do here
         return payload;
       }
@@ -86,7 +88,9 @@ if (!console) { var console = { log: function () {} }; }
 
         tmp = [];
         for (key in keys) {
-          tmp.push(object[keys[key]]);
+          if (keys.hasOwnProperty(key)) {
+            tmp.push(object[keys[key]]);
+          }
         }
 
         object.__key__ = tmp.join(":");
@@ -180,7 +184,7 @@ if (!console) { var console = { log: function () {} }; }
         var subscription,
             id;
 
-        query = options.subscriber == 'opaque' ? "/opaque/" + org_id + "/" + query : "/query/" + org_id + "/" + query;
+        query = options.subscriber === 'opaque' ? "/opaque/" + org_id + "/" + query : "/query/" + org_id + "/" + query;
         subscription = $.cometd.subscribe(query, handler);
 
         // NOTE: assuming cometd subscription object is an array that will return "query_name,integer" when toString is invoked
@@ -230,7 +234,7 @@ if (!console) { var console = { log: function () {} }; }
         // order first by port, then by protocol
         if (a.port < b.port) {
           order = -1;
-        } else if (a.port == b.port) {
+        } else if (a.port === b.port) {
           if (a.protocol < b.protocol) {
             order = -1;
           } else if (a.protocol > b.protocol) {
@@ -245,10 +249,10 @@ if (!console) { var console = { log: function () {} }; }
     };
 
     var process = {
-      meters: function (o) { return o.sort(sorter['meters']); },
-      country: function (o) { return o.sort(sorter['country']); },
+      meters: function (o) { return o.sort(sorter.meters); },
+      country: function (o) { return o.sort(sorter.country); },
       transport: function (o) {
-        var values = o.sort(sorter['transport']),
+        var values = o.sort(sorter.transport),
             ordered = [],
             i;
 
@@ -279,7 +283,9 @@ if (!console) { var console = { log: function () {} }; }
 
       // get all filter keys in sorted order
       for (key in obj) {
-        keys.push(key);
+        if (obj.hasOwnProperty(key)) {
+          keys.push(key);
+        }
       }
       keys.sort();
 
@@ -339,7 +345,7 @@ if (!console) { var console = { log: function () {} }; }
       } else {
         // streakerClient wasn't ready, so retry in a moment
         window.setTimeout(function () {
-          requestAggregateQueryName(query, meters, callback);
+          requestAggregatedQueryChannel(query, meters, callback);
         }, 100);
       }
     };
@@ -415,7 +421,9 @@ if (!console) { var console = { log: function () {} }; }
           msg.ext.flow_profile.name = '' + filterHash;
           msg.ext.flow_profile.filter = {};
           for (o in filter) {
-            msg.ext.flow_profile.filter[o] = filter[o];
+            if (filter.hasOwnProperty(o)) {
+              msg.ext.flow_profile.filter[o] = filter[o];
+            }
           }
 
           // store the query and callback for use when we get a response from cometd
@@ -492,8 +500,10 @@ if (!console) { var console = { log: function () {} }; }
             t;
 
         for (t in obj) {
-          empty = false;
-          break;
+          if (obj.hasOwnProperty(t)) {
+            empty = false;
+            break;
+          }
         }
 
         return empty;
@@ -506,7 +516,7 @@ if (!console) { var console = { log: function () {} }; }
 
           for (i = 0, len = removed ? removed.length : 0; i < len; ++i) {
             delete current[removed[i].__key__];
-          };
+          }
 
           for (i = 0, len = added ? added.length : 0; i < len; ++i) {
             current[added[i].__key__] = added[i];
@@ -541,7 +551,7 @@ if (!console) { var console = { log: function () {} }; }
         });
 
         return out;
-      };
+      }
 
       return function (msg) {
         var data = msg.data,
@@ -589,8 +599,6 @@ if (!console) { var console = { log: function () {} }; }
 
     // loop through subscribers and notify them of new data
     function update(data, force) {
-      var s;
-
       // only update subscribers if we aren't restarting
       if (!restarting || force) {
         data.state = state.update(data.added, data.removed);
@@ -599,17 +607,21 @@ if (!console) { var console = { log: function () {} }; }
         if (data.state || data.possiblyNoMeterData || force) {
 
           window.setTimeout(function () {
+            var s;
+
             for (s in subscribers) {
-              try {
-                updateSubscriber(subscribers[s], data);
-              } catch (e) {
-                // need to handle this generically so we still update the other subscribers
-                if (e.stack) {
-                  console.log(e.stack);
-                } else if (e.stackTrace) {
-                  console.log(e.stackTrace);
-                } else {
-                  console.log('Error: ' + e.type + ' - ' + e.message);
+              if (subscribers.hasOwnProperty(s)) {
+                try {
+                  updateSubscriber(subscribers[s], data);
+                } catch (e) {
+                  // need to handle this generically so we still update the other subscribers
+                  if (e.stack) {
+                    console.log(e.stack);
+                  } else if (e.stackTrace) {
+                    console.log(e.stackTrace);
+                  } else {
+                    console.log('Error: ' + e.type + ' - ' + e.message);
+                  }
                 }
               }
             }
@@ -646,7 +658,9 @@ if (!console) { var console = { log: function () {} }; }
             streakerID = WAITING;
 
             for (f in options.filter) {
-              filter[f] = options.filter[f];
+              if (options.filter.hasOwnProperty(f)) {
+                filter[f] = options.filter[f];
+              }
             }
 
             // grab meters from the aggregate value if it wasn't defined in filters
@@ -684,7 +698,9 @@ if (!console) { var console = { log: function () {} }; }
           // if this is a transient FP, we need to see if this disconnect will tear down the query set
           if (options.filter) {
             for (f in options.filter) {
-              filter[f] = options.filter[f];
+              if (options.filter.hasOwnProperty(f)) {
+                filter[f] = options.filter[f];
+              }
             }
 
             // grab meters from the aggregate value if it wasn't defined in filters
@@ -809,7 +825,7 @@ if (!console) { var console = { log: function () {} }; }
 
           // run an immediate update for this subscriber using the last update from streaker
           if ('state' in lastData) {
-            udpateSubscriber(subscribers[id], lastData);
+            updateSubscriber(subscribers[id], lastData);
           }
         }
       },
