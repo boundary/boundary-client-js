@@ -1,4 +1,4 @@
-/* Visit https://boundary.com/account to get your account credentials for this file */
+/* Visit https://app.boundary.com/account to get your account credentials for this file */
 var bndry = bndry || {};
 
 (function (bndry, undefined) {
