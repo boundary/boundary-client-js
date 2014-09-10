@@ -297,7 +297,7 @@ if (!console) { var console = { log: function () {} }; }
         fields.push((process[key] || process._default)(obj[key]));
       }
 
-      return bndry.utils.md5(JSON.stringify(fields));
+      return CryptoJS.MD5(JSON.stringify(fields)).toString();
     };
   })();
 
