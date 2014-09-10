@@ -1,11 +1,5 @@
 # Boundary JavaScript API
 
-### December Preview
-
----
-
-Note: This documentation represents the current status of the Boundary JavaScript API as of March 22, 2012. While we will make a best effort to maintain compatibility and provide advance notice of API changes, all APIs and output formats described below are subject to change.
-
 ## Overview
 
 The Boundary JavaScript API manages authentication and streaming data subscriptions for the Boundary Streaming API service. The API allows you to retrieve streaming updates relating to various aspects of your Boundary-monitored network in JSON format using a set of [predefined queries](https://app.boundary.com/docs/streaming_api#datasources). One common use of this functionality would be to create browser-based visualizations of the traffic data being reported for your organization. It is the basis of Boundary's own visualization front end.
@@ -15,6 +9,7 @@ The Boundary JavaScript API manages authentication and streaming data subscripti
 The following files, supplied in the repository, are required to run the JavaScript API:
 
 * **/lib/jquery-1.6.4.min.js** - jQuery (any recent version will do)
+* **/lib/md5.js** - CryptoJS MD5
 * **/lib/org/cometd.js** - CometD 
 * **/lib/org/cometd/TimeSyncExtension.js** - TimeSyncExtension for CometD
 * **/lib/jquery.cometd.js** and **lib/jquery.cometd-timesync.js** - jQuery CometD bindings
